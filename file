@@ -1,0 +1,142 @@
+import ee
+import os
+import numpy as np
+import pandas as pd
+import geopandas as gpd
+import rasterio
+import joblib
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report
+import matplotlib.pyplot as plt
+from rasterio.features import geometry_mask
+
+# -----------------------------------------------
+# Initialize Earth Engine
+# -----------------------------------------------
+ee.Initialize()
+
+# -----------------------------------------------
+# 1. NDVI Extraction
+# -----------------------------------------------
+def get_ndvi_image(year, region_bounds):
+    image = ee.ImageCollection('COPERNICUS/S2_SR') \
+        .filterDate(f'{year}-01-01', f'{year}-12-31') \
+        .filterBounds(region_bounds) \
+        .median()
+
+    ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI')
+    return ndvi
+
+def export_ndvi_to_drive(ndvi_img, region, file_name):
+    task = ee.batch.Export.image.toDrive(
+        image=ndvi_img.clip(region),
+        description=file_name,
+        folder='GEE_Exports',
+        fileNamePrefix=file_name,
+        region=region,
+        scale=10
+    )
+    task.start()
+    print(f"Export started for {file_name}...")
+
+# -----------------------------------------------
+# 2. Prepare Training Dataset
+# -----------------------------------------------
+def extract_ndvi_features(ndvi_tif, shapefile):
+    with rasterio.open(ndvi_tif) as src:
+        ndvi = src.read(1)
+        ndvi[ndvi == src.nodata] = np.nan
+        transform = src.transform
+        shape = src.shape
+
+    gdf = gpd.read_file(shapefile)
+    features = []
+
+    for _, row in gdf.iterrows():
+        mask = geometry_mask([row.geometry], shape, transform, invert=True)
+        values = ndvi[mask]
+        mean_ndvi = np.nanmean(values)
+        features.append([mean_ndvi, row['health_label']])
+
+    return pd.DataFrame(features, columns=['ndvi_mean', 'label'])
+
+# -----------------------------------------------
+# 3. Train Machine Learning Model
+# -----------------------------------------------
+def train_model(training_csv):
+    df = pd.read_csv(training_csv)
+    X = df[['ndvi_mean']]
+    y = df['label']
+    
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    
+    model = RandomForestClassifier(n_estimators=100, random_state=42)
+    model.fit(X_train, y_train)
+    
+    y_pred = model.predict(X_test)
+    print("Classification Report:\n", classification_report(y_test, y_pred))
+    
+    joblib.dump(model, 'mangrove_health_rf.pkl')
+    print("Model saved as 'mangrove_health_rf.pkl'")
+    return model
+
+# -----------------------------------------------
+# 4. Classify Entire NDVI Raster Using Model
+# -----------------------------------------------
+def classify_ndvi_raster(ndvi_tif, output_tif, model_path='mangrove_health_rf.pkl'):
+    model = joblib.load(model_path)
+    
+    with rasterio.open(ndvi_tif) as src:
+        ndvi = src.read(1)
+        profile = src.profile
+        ndvi[ndvi == src.nodata] = np.nan
+
+    flat_ndvi = ndvi.flatten()
+    valid_mask = ~np.isnan(flat_ndvi)
+    predictions = np.full_like(flat_ndvi, -1, dtype=int)
+    predictions[valid_mask] = model.predict(flat_ndvi[valid_mask].reshape(-1, 1))
+    
+    classified = predictions.reshape(ndvi.shape)
+    profile.update(dtype='int16', count=1)
+
+    with rasterio.open(output_tif, 'w', **profile) as dst:
+        dst.write(classified.astype('int16'), 1)
+    
+    print(f"Classified output saved to {output_tif}")
+
+# -----------------------------------------------
+# 5. Visualize Classified Health Map
+# -----------------------------------------------
+def plot_classified_map(tif_path):
+    with rasterio.open(tif_path) as src:
+        classified = src.read(1)
+    
+    plt.figure(figsize=(10, 6))
+    plt.imshow(classified, cmap='RdYlGn')
+    plt.title("Mangrove Health Classification Map")
+    plt.colorbar(label='Health Class (0 = Unhealthy, 1 = Healthy)')
+    plt.axis('off')
+    plt.show()
+
+# -----------------------------------------------
+# Example Usage
+# -----------------------------------------------
+if __name__ == "__main__":
+    # Step 1: NDVI Extraction
+    region = ee.Geometry.BBox(4.5, 4.3, 5.2, 5.0)  # Modify to your ROI
+    ndvi_img = get_ndvi_image(2024, region)
+    export_ndvi_to_drive(ndvi_img, region, "NDVI_2024_Mangrove")
+
+    # Step 2: Prepare dataset (after downloading NDVI from GEE manually)
+    # features_df = extract_ndvi_features("NDVI_2024_Mangrove.tif", "training_points.shp")
+    # features_df.to_csv("training_data.csv", index=False)
+
+    # Step 3: Train model
+    # model = train_model("training_data.csv")
+
+    # Step 4: Classify full raster
+    # classify_ndvi_raster("NDVI_2024_Mangrove.tif", "classified_mangrove_health.tif")
+
+    # Step 5: Visualize results
+    # plot_classified_map("classified_mangrove_health.tif")
