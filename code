@@ -1,0 +1,23 @@
+import ee
+ee.Initialize()
+
+def get_ndvi_image(year):
+    image = ee.ImageCollection('COPERNICUS/S2_SR') \
+        .filterDate(f'{year}-01-01', f'{year}-12-31') \
+        .filterBounds(ee.Geometry.BBox(4.5, 4.3, 5.2, 5.0)) \
+        .median()
+
+    ndvi = image.normalizedDifference(['B8', 'B4']).rename('NDVI')
+    return ndvi
+
+def export_ndvi(year, region, file_name):
+    ndvi_img = get_ndvi_image(year)
+    task = ee.batch.Export.image.toDrive(
+        image=ndvi_img.clip(region),
+        description=file_name,
+        folder='GEE_Exports',
+        fileNamePrefix=file_name,
+        region=region,
+        scale=10
+    )
+    task.start()
