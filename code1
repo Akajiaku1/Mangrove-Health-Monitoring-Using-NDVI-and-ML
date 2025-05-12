@@ -1,0 +1,20 @@
+import rasterio
+import geopandas as gpd
+import numpy as np
+import pandas as pd
+
+def extract_ndvi_features(ndvi_tif, shapefile):
+    with rasterio.open(ndvi_tif) as src:
+        ndvi = src.read(1)
+        ndvi[ndvi == src.nodata] = np.nan
+    
+    gdf = gpd.read_file(shapefile)
+    features = []
+
+    for _, row in gdf.iterrows():
+        mask = rasterio.features.geometry_mask([row.geometry], src.shape, src.transform, invert=True)
+        values = ndvi[mask]
+        mean_ndvi = np.nanmean(values)
+        features.append([mean_ndvi, row['health_label']])  # label: 0 = unhealthy, 1 = healthy
+
+    return pd.DataFrame(features, columns=['ndvi_mean', 'label'])
